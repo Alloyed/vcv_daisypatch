@@ -6,7 +6,8 @@ OPT = -O0
 # FLAGS will be passed to both the C and C++ compiler
 FLAGS += -Isrc/not_daisy -Iexternals/DaisySP/Source
 CFLAGS +=
-CXXFLAGS +=
+CXXFLAGS := $(filter-out -std=c++11,$(CXXFLAGS))
+CXXFLAGS += -std=c++20
 
 # Careful about linking to shared libraries, since you can't assume much about the user's environment and library search path.
 # Static libraries are fine, but they should be added to this plugin's build system.

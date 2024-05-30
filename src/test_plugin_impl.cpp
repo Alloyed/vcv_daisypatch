@@ -1,9 +1,32 @@
 #include "test_plugin_impl.h"
 
+#include "dsp/util.h"
 #include <daisysp.h>
+
+#include "dsp/psx.h"
+#include "dsp/resampler.h"
+#include "dsp/snes.h"
 
 using namespace NotDaisy;
 using namespace daisysp;
+
+#define SAMPLE_RATE 32000
+
+constexpr size_t snesBufferSize = 7680UL;
+int16_t snesBuffer[7680];
+SNES::Model snes(SNES::kOriginalSampleRate, snesBuffer, snesBufferSize);
+Resampler snesSampler(SNES::kOriginalSampleRate, SAMPLE_RATE);
+
+constexpr size_t psxBufferSize = 65536UL; // PSX::Model::GetBufferDesiredSizeFloats(PSX::kOriginalSampleRate);
+float psxBuffer[65536UL];
+PSX::Model psx(PSX::kOriginalSampleRate, psxBuffer, psxBufferSize);
+Resampler psxSampler(PSX::kOriginalSampleRate, SAMPLE_RATE);
+
+// 1.0f == psx, 0.0f == SNES
+float snesToPsxFade = 0.0f;
+
+// 10ms fade
+static constexpr float fadeRate = (10.0f / 1000.0f) / SAMPLE_RATE;
 
 void TestPluginImpl::Init(size_t samplerate)
 {
@@ -23,45 +46,45 @@ void TestPluginImpl::AudioCallback(AudioHandle::InputBuffer in, AudioHandle::Out
     // Simple example of a quad sine oscillator using the 4 cv inputs as v/oct inputs.
     patch_.ProcessAllControls();
 
-    const float kBaseNote = rack::dsp::FREQ_C4;
+    snes.cfg.echoBufferSize = patch_.GetKnobValue(static_cast<DaisyPatch::Ctrl>(1));
+    // snes.mod.echoBufferSize = jackValue(CV_5);
+    snes.cfg.echoDelayMod = 1.0f; // TODO
+    snes.cfg.echoFeedback = patch_.GetKnobValue(static_cast<DaisyPatch::Ctrl>(2));
+    // snes.mod.echoFeedback = jackValue(CV_6);
+    snes.cfg.filter = patch_.GetKnobValue(static_cast<DaisyPatch::Ctrl>(3));
+    // snes.mod.filter = jackValue(CV_7);
 
-    for (int i = 0; i < patch_.CTRL_LAST; ++i)
+    // PSX has no parameters yet D:
+
+    // float wetDry = clampf(knobValue(CV_4) + jackValue(CV_8), 0.0f, 1.0f);
+    float wetDry = 0.5f;
+    // hw.WriteCvOut(2, 2.5 * wetDry);
+
+    // if (button.RisingEdge() || hw.gate_in_1.Trig())
+    //{
+    //     snes.ClearBuffer();
+    //     psx.ClearBuffer();
+    // }
+
+    for (size_t i = 0; i < size; i++)
     {
-        const float cv = patch_.GetKnobValue(static_cast<DaisyPatch::Ctrl>(i));
-        const float f = kBaseNote * std::pow(2.f, cv);
-        osc_[i].SetFreq(f);
+        float snesLeft, snesRight, psxLeft, psxRight;
+        psxSampler.Process(in[0][i], in[1][i], psxLeft, psxRight,
+                           [](float inLeft, float inRight, float& outLeft, float& outRight) {
+                               psx.Process(inLeft, inRight, outLeft, outRight);
+                           });
+
+        snesSampler.Process(in[0][i], in[1][i], snesLeft, snesRight,
+                            [](float inLeft, float inRight, float& outLeft, float& outRight) {
+                                snes.Process(inLeft, inRight, outLeft, outRight);
+                            });
+
+        float left = fadeCpowf(snesLeft, psxLeft, snesToPsxFade);
+        float right = fadeCpowf(snesRight, psxRight, snesToPsxFade);
+
+        out[0][i] = lerpf(in[0][i], left, wetDry);
+        out[1][i] = lerpf(in[1][i], right, wetDry);
     }
-
-    for (size_t i = 0; i < size; ++i)
-    {
-        out[0][i] = osc_[0].Process();
-        out[1][i] = osc_[1].Process();
-        out[2][i] = osc_[2].Process();
-        out[3][i] = osc_[3].Process();
-    }
-
-    // Logical OR of the two gate inputs
-    if (patch_.gate_input[0].State() || patch_.gate_input[1].State())
-    {
-        dsy_gpio_write(&patch_.gate_output, true);
-    }
-    else
-    {
-        dsy_gpio_write(&patch_.gate_output, false);
-    }
-
-    // Comparator for cv outs
-    float cv_1 = patch_.controls[patch_.CTRL_1].Value();
-    float cv_2 = patch_.controls[patch_.CTRL_2].Value();
-    float cv_out1 = fmaxf(cv_1, cv_2);
-    float cv_out2 = fminf(cv_1, cv_2);
-
-    // Scale to 12 bits uint16_t
-    uint16_t cv_out1_scaled = static_cast<uint16_t>(cv_out1 / 5.f * 4095.f);
-    uint16_t cv_out2_scaled = static_cast<uint16_t>(cv_out2 / 5.f * 4095.f);
-
-    patch_.seed.dac.WriteValue(DacHandle::Channel::ONE, cv_out1_scaled);
-    patch_.seed.dac.WriteValue(DacHandle::Channel::TWO, cv_out2_scaled);
 }
 
 void TestPluginImpl::OnSampleRateChange(float sr)
