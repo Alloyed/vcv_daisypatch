@@ -1,6 +1,6 @@
 #!/bin/bash
 
-daisysp_dir=externals/daisySP
+daisysp_dir=externals/DaisySP
 
 pushd $daisysp_dir
 
